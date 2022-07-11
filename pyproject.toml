@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "merge-redux"
+version = "0.1.0"
+description = ""
+authors = ["Peter Baumgartner <5107405+pmbaumgartner@users.noreply.github.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.7"
+pandas = "^1.4.3"
+tqdm = "^4.64.0"
+
+[tool.poetry.dev-dependencies]
+pytest = "^5.2"
+ipython = "<8"
+black = "^22.6.0"
+flake8 = "^4.0.1"
+mypy = "^0.961"
+py-spy = "^0.3.12"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
