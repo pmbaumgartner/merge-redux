@@ -47,15 +47,15 @@ pip install git+https://github.com/pmbaumgartner/merge-redux.git
 For an example corpus with a single document that looks like this:
 
 ```
-# 3 0 2 1 3 0 3 1 4
-[["3", "0", "2", "1", "3", "0", "3", "1", "4"]]
+# 5 0 2 1 3 0 3 1 4
+[["5", "0", "2", "1", "3", "0", "3", "1", "4"]]
 ```
 
-After two iterations, this implementation picks the following winner from this single document corpus: `["3" (0), "0" (1), "1" (3)]` (in format `("token", position)`).
+After two iterations, this implementation picks the following winner from this single document corpus: `["0" (0), "3" (1), "1" (2)]` (in format `("token", position)`).
 
 On the second round a single bigram of `([("0", 0), ("1", 2)], [("3", 0)])`  gets created. If we think about it's creation, it is actually two distinct bigrams:
 
-1. One from indices `(1, 3)`, where the second element occurs at position `4` (after the second lexeme)
+1. One from indices `(1, 3)`, where the second element occurs at position `4` (after the second word)
 2. One from indices `(5, 7)`, where the second element occurs at position `6` (after the first word, in the gap)
 
 A byproduct of how the algorithm handles discontinuities means these both count towards the same source Bigram `([("0", 0), ("1", 2)], [("3", 0)])`. 

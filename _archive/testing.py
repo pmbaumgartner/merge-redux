@@ -4,7 +4,7 @@ from typing import List
 
 from tqdm import trange
 
-from src.merge_redux.walkthrough import (
+from src.merge_redux.core import (
     Bigram,
     BigramData,
     Gapsize,
@@ -28,7 +28,7 @@ from src.merge_redux.walkthrough import (
 corpus: List[List[str]] = [["0", "1", "2", "0", "1", "3", "4", "0", "1"]]
 
 # After 2 iters, winner: ["3" (0), "0" (1), "1" (3)]
-corpus: List[List[str]] = [["3", "0", "2", "1", "3", "0", "3", "1", "4"]]
+corpus: List[List[str]] = [["5", "0", "2", "1", "3", "0", "3", "1", "4"]]
 # Wrong
 
 
