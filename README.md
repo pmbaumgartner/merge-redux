@@ -6,7 +6,7 @@ This is a re-implementation of a multi-word expression (MWE) discovery algorithm
 
 In its current state is it not optimized - for the most part it replicates the data structures and logic of the original implementation and serves mostly as a translation of that code.
 
-**Usage**
+#### Usage
 
 ```python
 from typing import List
@@ -32,13 +32,13 @@ Wanna go faster? You can pass `min_bigram_freq` and `min_lexeme_freq` to `run`, 
 winners = run(corpus, 1, 100, min_bigram_freq=10, min_lexeme_freq=10)
 ```
 
-**Install**:
+#### Install
 
 ```
 pip install git+https://github.com/pmbaumgartner/merge-redux.git 
 ```
 
-**Limitations**
+#### Limitations
 
 **No tie-breaking** - I found this while testing and comparing to the original reference. If two bigrams are tied for log-likelihood, there is no tie-breaking mechanism. Both this implementation and the original implementation simply pick the first bigram from the index with the maximum log-likelihood value. However, we have slightly different implementations of how the statistics table is created (i.e., the ordering of the index), which makes direct comparisons between implementations difficult.
 
@@ -62,7 +62,7 @@ A byproduct of how the algorithm handles discontinuities means these both count 
 
 I think the algorithm is counting on the fact that there probably isn't an _actual_ sequence of lexemes where a word would appear withinin the gap **and** after the gap, and this is more of an artifact of this specific example with a single document and unrealistically small vocabulary.
 
-**References**:
+#### References
 
 [^1]: awahl1, MERGE. 2017. Accessed: Jul. 11, 2022. [Online]. Available: https://github.com/awahl1/MERGE
 
