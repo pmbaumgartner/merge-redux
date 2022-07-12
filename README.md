@@ -28,7 +28,7 @@ winners = merge_run(corpus, gapsize=1, iterations=1)
 
 Wanna go faster? You can pass `min_bigram_freq` and `min_lexeme_freq` to `run`, which will ignore any bigrams or lexemes in any iteration with a total frequency in the corpus lower than those values, which can result in a significant speedup when calculating the log-likelihood statistics for each element in the corpus. For example, the example below was about a 10x speedup on the sample corpus:
 
-```
+```python
 winners = run(corpus, 1, 100, min_bigram_freq=10, min_lexeme_freq=10)
 ```
 
