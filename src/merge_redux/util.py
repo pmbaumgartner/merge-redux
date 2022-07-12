@@ -1,5 +1,5 @@
 from typing import Dict, List
-from core import LexemeData, WinnerInfo, LineIndex, Lexeme
+from .core import LexemeData, WinnerInfo, LineIndex, Lexeme
 
 
 def get_lines_with_winner(
