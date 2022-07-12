@@ -2,7 +2,7 @@
 
 ⚠️ WIP
 
-This is a re-implementation of a multi-word expression (MWE) discovery algorithm called MERGE, detailed in a PhD thesis and publication[^2][^3]. The code was derived from an existing implementation from the original author[^1], and was coverted to a more modern python style. This included converting from python 2 to 3, the inclusion of types, and modifications to make the code a bit more linear rather than the original object-oriented implementation.
+This is a re-implementation of a multi-word expression (MWE) discovery algorithm called MERGE, detailed in a publication and PhD thesis[^2][^3]. The code was derived from an existing implementation from the original author[^1], and was coverted to a more modern python style. This included converting from python 2 to 3, the inclusion of types, and modifications to make the code a bit more linear rather than the original object-oriented implementation.
 
 In its current state is it not optimized - for the most part it replicates the data structures and logic of the original implementation and serves mostly as a translation of that code.
 
