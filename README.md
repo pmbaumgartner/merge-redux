@@ -40,9 +40,9 @@ pip install git+https://github.com/pmbaumgartner/merge-redux.git
 
 **Limitations**
 
-**No Tie Breaking** - I found this while testing and comparing to the original reference. If two bigrams are tied for log-likelihood, there is no tie-breaking mechanism. Both this implementation and the original implementation simply pick the first bigram from the index with the maximum log-likelihood value. However, we have slightly different implementations of how the statistics table is calculated, which makes direct comparisons between implementations difficult.
+**No tie-breaking** - I found this while testing and comparing to the original reference. If two bigrams are tied for log-likelihood, there is no tie-breaking mechanism. Both this implementation and the original implementation simply pick the first bigram from the index with the maximum log-likelihood value. However, we have slightly different implementations of how the statistics table is created (i.e., the ordering of the index), which makes direct comparisons between implementations difficult.
 
-**Ambiguous discontinuities** - This example I am less sure that I have implemented the algorithm correctly, but I think there is an issue with what can constitute a "bigram" with discontinuities. 
+**Single Bigrams with discontinuities forming from distinct Lexeme positions** - This example I am less sure that I have implemented the algorithm correctly, but I think there is an issue with what can constitute a "bigram" with discontinuities. 
 
 For an example corpus with a single document that looks like this:
 
