@@ -60,7 +60,7 @@ On the second round a single bigram of `([("0", 0), ("1", 2)], [("3", 0)])`  get
 
 A byproduct of how the algorithm handles discontinuities means these both count towards the same source Bigram `([("0", 0), ("1", 2)], [("3", 0)])`. 
 
-I think the algorithm is counting on the fact that there probably isn't an _actual_ sequence of lexemes where a word would appear withinin the gap **and** after the gap, and this is more of an artifact of this specific example with a single document and unrealistically small vocabulary.
+I think the algorithm is counting on the fact that there probably isn't an _actual_ sequence of lexemes where the same word would appear within the gap **and** after the gap, and this is more of an artifact of this specific example with a single document and unrealistically small vocabulary.
 
 #### References
 
