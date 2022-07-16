@@ -4,9 +4,8 @@ from typing import Counter as CounterType
 from typing import DefaultDict, Dict, List, NamedTuple, NewType, Set, Tuple
 
 import numpy as np
-import pandas as pd
+import numpy.typing as npt
 from tqdm import tqdm, trange
-
 
 _SMALL = 1e-10
 
@@ -119,6 +118,12 @@ class BigramData:
     right_lex_to_bigrams: Dict[Tuple[Lexeme, Gapsize], Set[Bigram]] = field(
         default_factory=lambda: defaultdict(set)
     )
+    left_lex_freqs: Dict[Gapsize, Dict[Lexeme, int]] = field(
+        default_factory=lambda: defaultdict(dict)
+    )
+    right_lex_freqs: Dict[Gapsize, Dict[Lexeme, int]] = field(
+        default_factory=lambda: defaultdict(dict)
+    )
 
     @classmethod
     def from_lexemes(cls, lexeme_data: LexemeData, gapsize: Gapsize) -> "BigramData":
@@ -159,6 +164,14 @@ class BigramData:
         # do for us anyway
         self.left_lex_to_bigrams[(bigram.el1, bigram.gapsize)].add(bigram)
         self.right_lex_to_bigrams[(bigram.el2, bigram.gapsize)].add(bigram)
+        if self.left_lex_freqs[bigram.gapsize].get(bigram.el1, None):
+            self.left_lex_freqs[bigram.gapsize][bigram.el1] += 1
+        else:
+            self.left_lex_freqs[bigram.gapsize][bigram.el1] = 1
+        if self.right_lex_freqs[bigram.gapsize].get(bigram.el2, None):
+            self.right_lex_freqs[bigram.gapsize][bigram.el2] += 1
+        else:
+            self.right_lex_freqs[bigram.gapsize][bigram.el2] = 1
         self.bigrams_to_freqs[bigram] += 1
         self.bigrams_to_locations[bigram].add(location)
 
@@ -166,75 +179,70 @@ class BigramData:
     def type_count(self) -> int:
         return len(self.bigrams_to_freqs)
 
+    @property
+    def bigram_count(self) -> int:
+        return sum(self.bigrams_to_freqs.values())
+
     def remove_bigram(self, bigram: Bigram):
-        self.bigrams_to_freqs.pop(bigram)
-        self.bigrams_to_locations.pop(bigram)
+        freq = self.bigrams_to_freqs.pop(bigram)
         self.left_lex_to_bigrams[(bigram.el1, bigram.gapsize)].remove(bigram)
         self.right_lex_to_bigrams[(bigram.el2, bigram.gapsize)].remove(bigram)
+        self.left_lex_freqs[bigram.gapsize][bigram.el1] -= freq
+        self.right_lex_freqs[bigram.gapsize][bigram.el2] -= freq
 
 
-def create_bigram_table(
-    lexeme_data: LexemeData,
-    bigram_data: BigramData,
-    min_bigram_freq: int = 0,
-    min_lexeme_freq: int = 0,
-) -> pd.DataFrame:
-    data = []
-    for (bigram, freq) in bigram_data.bigrams_to_freqs.items():
-        if freq < min_bigram_freq:
-            continue
-        # Look up the frequency of each element of the bigrams
-        el1_freq = lexeme_data.lexemes_to_freqs[bigram.el1]
-        el2_freq = lexeme_data.lexemes_to_freqs[bigram.el2]
-        if el1_freq < min_lexeme_freq or el2_freq < min_lexeme_freq:
-            continue
-        row = {
-            "bigram": bigram,
-            "bgr_freq": freq,
-            "el1_freq": el1_freq,
-            "el2_freq": el2_freq,
-        }
-        data.append(row)
-
-    table = pd.DataFrame(data).set_index("bigram")
-    return table
-
-
-def calculate_log_likelihood(
-    statistics: pd.DataFrame, lexeme_data: LexemeData
-) -> pd.Series:
-
-    corpus_size = lexeme_data.corpus_size
-
-    obsA = statistics["bgr_freq"]
-    obsB = statistics["el1_freq"] - statistics["bgr_freq"]
-    obsC = statistics["el2_freq"] - statistics["bgr_freq"]
-    obsD = corpus_size - (obsA + obsB + obsC)
-
-    expA = statistics["el2_freq"] / corpus_size * statistics["el1_freq"]
-    expB = (corpus_size - statistics["el2_freq"]) / corpus_size * statistics["el1_freq"]
-    expC = statistics["el2_freq"] / corpus_size * (corpus_size - statistics["el1_freq"])
-    expD = (
-        (corpus_size - statistics["el2_freq"])
-        / corpus_size
-        * (corpus_size - statistics["el1_freq"])
+def calculate_winner_array(bigram_data: BigramData) -> Bigram:
+    bigram_freq_array = np.empty(len(bigram_data.bigrams_to_freqs), dtype=np.int_)
+    el1_freq_array = np.empty(len(bigram_data.bigrams_to_freqs), dtype=np.int_)
+    el2_freq_array = np.empty(len(bigram_data.bigrams_to_freqs), dtype=np.int_)
+    bigrams_list = []
+    for i, (bigram, freq) in enumerate(bigram_data.bigrams_to_freqs.items()):
+        bigram_freq_array[i] = freq
+        l1 = bigram_data.left_lex_freqs[bigram.gapsize][bigram.el1]
+        el1_freq_array[i] = l1
+        l2 = bigram_data.right_lex_freqs[bigram.gapsize][bigram.el2]
+        el2_freq_array[i] = l2
+        bigrams_list.append(bigram)
+    log_likelihoods = calculate_log_likelihood_array(
+        bigram_freq_array, el1_freq_array, el2_freq_array, bigram_data.bigram_count
     )
+    # from IPython import embed
 
-    llA = obsA * np.log(obsA / (expA + _SMALL))
-    llB = np.where(obsB != 0, obsB * np.log(obsB / (expB + _SMALL)), 0)
-    llC = np.where(obsC != 0, obsC * np.log(obsC / (expC + _SMALL)), 0)
-    llD = obsD * np.log(obsD / (expD + _SMALL))
-
-    log_likelihood = 2 * (llA + llB + llC + llD)
-    log_likelihood = np.where(llA > 0, log_likelihood, log_likelihood * -1)
-    log_likelihood_series = pd.Series(log_likelihood, index=statistics.index)
-    return log_likelihood_series
-
-
-def calculate_winner(initial_lexemes: LexemeData, statistics: pd.DataFrame) -> Bigram:
-    log_likelihood = calculate_log_likelihood(statistics, initial_lexemes)
-    winner: Bigram = log_likelihood.idxmax()  # type: ignore
+    # embed()
+    winner_ix = np.argmax(log_likelihoods)
+    winner: Bigram = bigrams_list[winner_ix]
     return winner
+
+
+# @numba.jit(
+#     numba.float64[:](numba.int64[:], numba.int64[:], numba.int64[:], numba.int64),
+#     nopython=True,
+#     parallel=True,
+# )
+def calculate_log_likelihood_array(
+    bigram_freq_array: npt.NDArray[np.int_],
+    el1_freq_array: npt.NDArray[np.int_],
+    el2_freq_array: npt.NDArray[np.int_],
+    bigram_count: int,
+) -> npt.NDArray[np.float_]:
+    obsA = bigram_freq_array
+    obsB = el1_freq_array  # can be 0
+    obsC = el2_freq_array  # can be 0
+    obsD = bigram_count - (obsA + obsB + obsC)
+    # http://ecologyandevolution.org/statsdocs/online-stats-manual-chapter4.html
+    expA = ((obsA + obsB) * (obsA + obsC)) / bigram_count  # can basically be 0
+    expB = ((obsA + obsB) * (obsB + obsD)) / bigram_count  # min = 1
+    expC = ((obsC + obsD) * (obsA + obsC)) / bigram_count
+    expD = ((obsC + obsD) * (obsB + obsD)) / bigram_count
+
+    llA = obsA * np.log((obsA / (expA + _SMALL)) + _SMALL)
+    llB = obsB * np.log((obsB / (expB + _SMALL)) + _SMALL)
+    llC = obsC * np.log((obsC / (expC + _SMALL)) + _SMALL)
+    llD = obsD * np.log((obsD / (expD + _SMALL)) + _SMALL)
+
+    log_likelihood = 2.0 * (llA + llB + llC + llD)
+    log_likelihood = np.where(llA > 0, log_likelihood, log_likelihood * -1.0)
+    return log_likelihood
 
 
 SatellitePosition = NewType("SatellitePosition", int)
@@ -486,47 +494,6 @@ def update_lexeme_counts_with_merged_elements(
     lexeme_data.lexemes_to_freqs[winner_info.bigram.el2] = new_el2_freq
 
 
-def update_bigram_statistics_with_merged_elements(
-    winner_info: WinnerInfo,
-    gapsize: Gapsize,
-    bigram_data: BigramData,
-    lexeme_data: LexemeData,
-    statistics: pd.DataFrame,
-):
-    # MUST BE RUN AFTER LEXEME COUNTS IS UPDATED!
-    new_el1_freq = lexeme_data.lexemes_to_freqs[winner_info.bigram.el1]
-    new_el2_freq = lexeme_data.lexemes_to_freqs[winner_info.bigram.el2]
-
-    for curr_gapsize in range(gapsize + 1):
-        curr_gapsize = Gapsize(curr_gapsize)
-        el1_left_pos = bigram_data.left_lex_to_bigrams[
-            (winner_info.bigram.el1, curr_gapsize)
-        ]
-        el1_right_pos = bigram_data.right_lex_to_bigrams[
-            (winner_info.bigram.el1, curr_gapsize)
-        ]
-        el2_left_pos = bigram_data.left_lex_to_bigrams[
-            (winner_info.bigram.el2, curr_gapsize)
-        ]
-        el2_right_pos = bigram_data.right_lex_to_bigrams[
-            (winner_info.bigram.el2, curr_gapsize)
-        ]
-
-        # Note
-        bigram_pos_columns = [
-            (el1_left_pos, "el1_freq"),
-            (el2_left_pos, "el2_freq"),
-            (el1_right_pos, "el1_freq"),
-            (el2_right_pos, "el2_freq"),
-        ]
-        for bigrams, col in bigram_pos_columns:
-            for bigram in bigrams:
-                value = new_el1_freq if col.startswith("el1") else new_el2_freq
-                statistics.at[bigram, col] = value
-        # This can definitely be optimized if we could just join these
-        # rather than a lookup at each individual row
-
-
 def update_bigram_data(bigram_data: BigramData, new_bigrams: BigramData):
     for bigram, freq in new_bigrams.bigrams_to_freqs.items():
         bigram_data.bigrams_to_freqs[bigram] += freq
@@ -540,6 +507,9 @@ def update_bigram_data(bigram_data: BigramData, new_bigrams: BigramData):
         bigram_data.left_lex_to_bigrams[
             (el1, curr_gapsize)
         ] = curr_left_lex_to_bigrams.union(bigrams)
+        bigram_data.left_lex_freqs[curr_gapsize][el1] = new_bigrams.left_lex_freqs[
+            curr_gapsize
+        ][el1]
 
     for (el2, curr_gapsize), bigrams in new_bigrams.right_lex_to_bigrams.items():
         curr_right_lex_to_bigrams = bigram_data.right_lex_to_bigrams[
@@ -548,36 +518,9 @@ def update_bigram_data(bigram_data: BigramData, new_bigrams: BigramData):
         bigram_data.right_lex_to_bigrams[
             (el2, curr_gapsize)
         ] = curr_right_lex_to_bigrams.union(bigrams)
-
-
-def update_bigram_statistics(
-    statistics: pd.DataFrame,
-    bigram_data: BigramData,
-    lexeme_data: LexemeData,
-    new_bigrams: BigramData,
-    min_bigram_freq: int = 0,
-    min_lexeme_freq: int = 0,
-):
-    new_bigram_records = []
-    for bigram in new_bigrams.bigrams_to_freqs:
-        new_freq = bigram_data.bigrams_to_freqs[bigram]
-        if new_freq < min_bigram_freq:
-            continue
-        new_el1_freq = lexeme_data.lexemes_to_freqs[bigram.el1]
-        new_el2_freq = lexeme_data.lexemes_to_freqs[bigram.el2]
-        if new_el1_freq < min_lexeme_freq or new_el2_freq < min_lexeme_freq:
-            continue
-        new_bigram_records.append(
-            {
-                "bigram": bigram,
-                "bgr_freq": new_freq,
-                "el1_freq": new_el1_freq,
-                "el2_freq": new_el2_freq,
-            }
-        )
-
-    new_bigram_df = pd.DataFrame(new_bigram_records).set_index("bigram")
-    statistics = pd.concat((statistics, new_bigram_df), axis="index")
+        bigram_data.right_lex_freqs[curr_gapsize][el2] = new_bigrams.right_lex_freqs[
+            curr_gapsize
+        ][el2]
 
 
 def update_conflicting_bigrams(
@@ -595,19 +538,6 @@ def update_conflicting_bigrams(
             bigram_data.right_lex_to_bigrams[(bigram.el2, bigram.gapsize)].remove(
                 bigram
             )
-
-
-def update_conflicting_bigram_statistics(
-    statistics: pd.DataFrame, conflicting_bigrams: BigramData, bigram_data: BigramData
-):
-    for bigram in conflicting_bigrams.bigrams_to_freqs:
-        statistics.at[bigram, "bgr_freq"] = bigram_data.bigrams_to_freqs[bigram]
-
-
-def remove_winner_from_statistics(statistics: pd.DataFrame, winner_info: WinnerInfo):
-    # We've removed the need to use this, since we create a new statistics table
-    # each time.
-    statistics.at[winner_info.bigram, "bgr_freq"] = 0
 
 
 def remove_winner_from_bigram_data(winner: Bigram, bigram_data: BigramData):
@@ -629,14 +559,14 @@ def run(
     gapsize = Gapsize(gapsize)
     lexemes = LexemeData.from_corpus(corpus)
     bigrams = BigramData.from_lexemes(lexemes, gapsize)
-    statistics = create_bigram_table(
-        lexemes,
-        bigrams,
-        min_bigram_freq=min_bigram_freq,
-        min_lexeme_freq=min_lexeme_freq,
-    )
+    # statistics = create_bigram_table(
+    #     lexemes,
+    #     bigrams,
+    #     min_bigram_freq=min_bigram_freq,
+    #     min_lexeme_freq=min_lexeme_freq,
+    # )
     for _ in trange(iterations):
-        winner = calculate_winner(lexemes, statistics)
+        winner = calculate_winner_array(bigrams)
         winner_info = WinnerInfo.from_bigram_with_data(winner, bigrams)
         winners.append(winner_info.merged_lexeme)
         # Cleanup stuff
@@ -650,11 +580,11 @@ def run(
         update_bigram_data(bigrams, new_bigrams)
         update_conflicting_bigrams(bigrams, conflicting_bigrams)
         remove_winner_from_bigram_data(winner, bigrams)
-        statistics = create_bigram_table(
-            lexemes,
-            bigrams,
-            min_bigram_freq=min_bigram_freq,
-            min_lexeme_freq=min_lexeme_freq,
-        )
+        # statistics = create_bigram_table(
+        #     lexemes,
+        #     bigrams,
+        #     min_bigram_freq=min_bigram_freq,
+        #     min_lexeme_freq=min_lexeme_freq,
+        # )
 
     return winners
