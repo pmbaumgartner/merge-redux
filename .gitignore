@@ -160,4 +160,7 @@ cython_debug/
 #.idea/
 
 # project
-sample_corpus/
+
+
+# in git LFS
+# sample_corpus/
