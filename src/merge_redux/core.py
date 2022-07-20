@@ -1,6 +1,6 @@
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Counter as CounterType
+from typing import Counter as CounterType, Iterable, Optional, Sized
 from typing import DefaultDict, Dict, List, NamedTuple, NewType, Set, Tuple
 
 import numpy as np
@@ -42,35 +42,36 @@ class LexemeData:
     # NOTE: This is a Counter in original code, but doesn't use counter methods.
     # and is typed as a regular dict here
     lexemes_to_freqs: Dict[Lexeme, int] = field(default_factory=dict)
-    turn_lengths: Dict[LineIndex, int] = field(default_factory=dict)
+    line_lengths: Dict[LineIndex, int] = field(default_factory=dict)
 
     def get_lexeme(
-        self, turn_index: LineIndex, word_index: TokenIndex
+        self, line_index: LineIndex, word_index: TokenIndex
     ) -> Tuple[Lexeme, TokenIndex]:
-        """Gets the lexeme at a turn_index, word_index. This looks up the relevant
+        """Gets the lexeme at a line_index, word_index. This looks up the relevant
         Lexeme.token_index for the specificed index and then subtracts that from the given
         word_index to ensure you get the left anchor of any multi-word lexemes.
 
         Args:
-            turn_index (LineIndex): The turn or line index.
+            line_index (LineIndex): The line index.
             word_index (TokenIndex): The word index.
 
         Returns:
             Tuple[Lexeme, TokenIndex]: The left anchor lexeme and position of that anchor.
         """
-        lexeme = self.locations_to_lexemes[turn_index][word_index]
+        lexeme = self.locations_to_lexemes[line_index][word_index]
         pos = TokenIndex(word_index - lexeme.token_index)
-        left_lexeme = self.locations_to_lexemes[turn_index][pos]
+        left_lexeme = self.locations_to_lexemes[line_index][pos]
         return left_lexeme, pos
 
     @classmethod
-    def from_corpus(cls, corpus: List[List[str]]) -> "LexemeData":
+    def from_corpus(cls, corpus: Iterable[Iterable[str]]) -> "LexemeData":
         lexeme_data = cls()
+        total: Optional[int] = len(corpus) if isinstance(corpus, Sized) else None
         corpus_iter_progress = tqdm(
             enumerate(corpus),
             desc="Creating LexemeData from Corpus",
             unit="line",
-            total=len(corpus),
+            total=total,
         )
         for (line_ix, tokens) in corpus_iter_progress:
             for (word_ix, word) in enumerate(tokens):
@@ -84,7 +85,7 @@ class LexemeData:
         lexeme_data.lexemes_to_freqs = {
             k: len(v) for k, v in lexeme_data.lexemes_to_locations.items()
         }
-        lexeme_data.turn_lengths = {
+        lexeme_data.line_lengths = {
             LineIndex(line_ix): max(token_index) + 1
             for (line_ix, token_index) in lexeme_data.locations_to_lexemes.items()
         }
@@ -129,10 +130,10 @@ class BigramData:
     def from_lexemes(cls, lexeme_data: LexemeData, gapsize: Gapsize) -> "BigramData":
         bigram_data = cls()
         corpus_iter_progress = tqdm(
-            lexeme_data.turn_lengths.items(),
+            lexeme_data.line_lengths.items(),
             desc="Creating BigramData from LexemeData",
             unit="line",
-            total=len(lexeme_data.turn_lengths),
+            total=len(lexeme_data.line_lengths),
         )
         for line_ix, line_length in corpus_iter_progress:
             for curr_gapsize in range(gapsize + 1):
@@ -206,9 +207,6 @@ def calculate_winner_array(bigram_data: BigramData) -> Bigram:
     log_likelihoods = calculate_log_likelihood_array(
         bigram_freq_array, el1_freq_array, el2_freq_array, bigram_data.bigram_count
     )
-    # from IPython import embed
-
-    # embed()
     winner_ix = np.argmax(log_likelihoods)
     winner: Bigram = bigrams_list[winner_ix]
     return winner
@@ -226,12 +224,12 @@ def calculate_log_likelihood_array(
     bigram_count: int,
 ) -> npt.NDArray[np.float_]:
     obsA = bigram_freq_array
-    obsB = el1_freq_array  # can be 0
-    obsC = el2_freq_array  # can be 0
+    obsB = el1_freq_array
+    obsC = el2_freq_array
     obsD = bigram_count - (obsA + obsB + obsC)
     # http://ecologyandevolution.org/statsdocs/online-stats-manual-chapter4.html
-    expA = ((obsA + obsB) * (obsA + obsC)) / bigram_count  # can basically be 0
-    expB = ((obsA + obsB) * (obsB + obsD)) / bigram_count  # min = 1
+    expA = ((obsA + obsB) * (obsA + obsC)) / bigram_count
+    expB = ((obsA + obsB) * (obsB + obsD)) / bigram_count
     expC = ((obsC + obsD) * (obsA + obsC)) / bigram_count
     expD = ((obsC + obsD) * (obsB + obsD)) / bigram_count
 
@@ -313,7 +311,7 @@ class WinnerInfo:
         ]
 
     def generate_context_positions(
-        self, turn_length: int, token_index: TokenIndex, gapsize: Gapsize
+        self, line_length: int, token_index: TokenIndex, gapsize: Gapsize
     ) -> List[Tuple[ContextPosition, SatellitePosition]]:
         """Generates context positions from the merged lexeme.
         For a given token_index and gapsize a context position is:
@@ -326,11 +324,11 @@ class WinnerInfo:
         e.g. for the fifth token, with a merged word position of 2, gapsize 1 it's:
         5 + 2 + 1 + 1 = 9 (from a discontiuous bigram with a discontinuous satellite from the gap)
 
-        It also calculates it to the left, so convert the operations to subtraction for that.
+        It also calculates positions to the left of the lexeme via subtraction.
 
         Args:
             merge_token (Lexeme): The merge token to use word positions from.
-            turn_length (int): The length of the turn (used to filter satellite positions)
+            line_length (int): The length of the line (used to filter satellite positions)
             token_index (TokenIndex): The reference token index to generate positions from.
             gapsize: (Gapsize): The gapsize to generate satellites for.
 
@@ -354,7 +352,7 @@ class WinnerInfo:
                 right_context_position = ContextPosition(
                     satellite_position + curr_gapsize + 1
                 )
-                if right_context_position < turn_length:
+                if right_context_position < line_length:
                     curr_contextpos = (
                         right_context_position,
                         satellite_position,
@@ -369,6 +367,7 @@ def calculate_new_and_conflicting_bigrams(
     gapsize: Gapsize,
 ) -> Tuple[BigramData, BigramData]:
     # TODO: Can we separate this logic from the merged satellite positions?
+
     merge_token_count = 0
     new_bigrams = BigramData()
     conflicting_bigrams = BigramData()
@@ -385,7 +384,7 @@ def calculate_new_and_conflicting_bigrams(
 
         merge_token_count += 1
 
-        curr_turn_length = lexeme_data.turn_lengths[line_ix]
+        curr_turn_length = lexeme_data.line_lengths[line_ix]
 
         context_positions = winner.generate_context_positions(
             curr_turn_length, word_ix, gapsize
