@@ -376,12 +376,6 @@ def calculate_new_and_conflicting_bigrams(
     ] = {}
 
     for (line_ix, word_ix) in winner.bigram_locations:
-        if (line_ix, word_ix) in conflicting_bigrams.bigrams_to_locations[
-            winner.bigram
-        ]:
-            # TODO: Do we need this?
-            continue
-
         merge_token_count += 1
 
         curr_turn_length = lexeme_data.line_lengths[line_ix]
@@ -392,8 +386,8 @@ def calculate_new_and_conflicting_bigrams(
         for context_position_info in context_positions:
             context_pos, satellite_position = context_position_info
             if context_pos in winner.satellite_positions(word_ix):
-                # TODO: Investigate what this does, without it a bunch
-                # of token counts are added
+                # This checks whether the token index is itself.
+
                 continue
 
             premerge_lexeme, premerge_leftanchor = lexeme_data.get_lexeme(
