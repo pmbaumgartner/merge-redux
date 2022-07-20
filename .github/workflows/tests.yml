@@ -10,10 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+        with:
+          lfs: true
       - uses: actions/setup-python@v2
         with:
           python-version: 3.9
-          lfs: true
       - name: cache poetry install
         uses: actions/cache@v2
         with:
