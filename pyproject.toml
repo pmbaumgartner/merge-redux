@@ -8,6 +8,7 @@ authors = ["Peter Baumgartner <5107405+pmbaumgartner@users.noreply.github.com>"]
 python = ">=3.7,<3.11"
 tqdm = "^4.64.0"
 numpy = ">=1.18,<1.23"
+pydantic = "^1.10.2"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"

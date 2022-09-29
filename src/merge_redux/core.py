@@ -1,7 +1,10 @@
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import field, dataclass
+from itertools import groupby
+from pathlib import Path
 from typing import Counter as CounterType, Iterable, Optional, Sized
 from typing import DefaultDict, Dict, List, NamedTuple, NewType, Set, Tuple
+import json
 
 import numpy as np
 import numpy.typing as npt
@@ -10,20 +13,12 @@ from tqdm import tqdm, trange
 _SMALL = 1e-10
 
 
-class Word(NamedTuple):
-    wordstr: str
-    position: int
-
-    def __repr__(self):
-        return f"Word('{self.wordstr}', {self.position})"
-
-
 class Lexeme(NamedTuple):
-    word: Tuple[Word, ...]
-    token_index: int
+    word: Tuple[str, ...]
+    ix: int
 
     def __repr__(self):
-        return f"Lexeme({self.word}, {self.token_index})"
+        return f"({self.word}, {self.ix})"
 
 
 LineIndex = NewType("LineIndex", int)
@@ -38,30 +33,7 @@ class LexemeData:
     locations_to_lexemes: DefaultDict[LineIndex, Dict[TokenIndex, Lexeme]] = field(
         default_factory=lambda: defaultdict(dict)
     )
-
-    # NOTE: This is a Counter in original code, but doesn't use counter methods.
-    # and is typed as a regular dict here
     lexemes_to_freqs: Dict[Lexeme, int] = field(default_factory=dict)
-    line_lengths: Dict[LineIndex, int] = field(default_factory=dict)
-
-    def get_lexeme(
-        self, line_index: LineIndex, word_index: TokenIndex
-    ) -> Tuple[Lexeme, TokenIndex]:
-        """Gets the lexeme at a line_index, word_index. This looks up the relevant
-        Lexeme.token_index for the specificed index and then subtracts that from the given
-        word_index to ensure you get the left anchor of any multi-word lexemes.
-
-        Args:
-            line_index (LineIndex): The line index.
-            word_index (TokenIndex): The word index.
-
-        Returns:
-            Tuple[Lexeme, TokenIndex]: The left anchor lexeme and position of that anchor.
-        """
-        lexeme = self.locations_to_lexemes[line_index][word_index]
-        pos = TokenIndex(word_index - lexeme.token_index)
-        left_lexeme = self.locations_to_lexemes[line_index][pos]
-        return left_lexeme, pos
 
     @classmethod
     def from_corpus(cls, corpus: Iterable[Iterable[str]]) -> "LexemeData":
@@ -77,19 +49,21 @@ class LexemeData:
             for (word_ix, word) in enumerate(tokens):
                 line_ix = LineIndex(line_ix)
                 word_ix = TokenIndex(word_ix)
-                lexeme = Lexeme(word=(Word(word, 0),), token_index=0)
+                lexeme = Lexeme(word=(word,), ix=0)
                 loc = (line_ix, word_ix)
                 lexeme_data.lexemes_to_locations[lexeme].add(loc)
                 lexeme_data.locations_to_lexemes[line_ix][word_ix] = lexeme
 
+        # NOTE: Using this conditional prevents double counting merged lexemes.
         lexeme_data.lexemes_to_freqs = {
-            k: len(v) for k, v in lexeme_data.lexemes_to_locations.items()
-        }
-        lexeme_data.line_lengths = {
-            LineIndex(line_ix): max(token_index) + 1
-            for (line_ix, token_index) in lexeme_data.locations_to_lexemes.items()
+            k: len(v) for k, v in lexeme_data.lexemes_to_locations.items() if k.ix == 0
         }
         return lexeme_data
+
+    @property
+    def corpus_length(self) -> int:
+        """Returns number of lines in corpus: max(line_ix) + 1."""
+        return max(self.locations_to_lexemes.keys()) + 1
 
     @property
     def corpus_size(self) -> int:
@@ -97,14 +71,23 @@ class LexemeData:
         unigrams get merged into bigrams (as those are a single 'token')"""
         return sum(self.lexemes_to_freqs.values())
 
+    def render_corpus(self) -> List[List[Lexeme]]:
+        corpus = []
+        for line_ix in self.locations_to_lexemes:
+            line_tokens = []
+            for token_ix in self.locations_to_lexemes[line_ix]:
+                line_tokens.append(self.locations_to_lexemes[line_ix][token_ix])
+            corpus.append(line_tokens)
+        return corpus
 
-Gapsize = NewType("Gapsize", int)
+    def locations_to_root_lexemes(self, line: LineIndex) -> Dict[TokenIndex, Lexeme]:
+        lexeme_dicts = self.locations_to_lexemes[line]
+        return {k: v for k, v in lexeme_dicts.items() if v.ix == 0}
 
 
 class Bigram(NamedTuple):
     el1: Lexeme
     el2: Lexeme
-    gapsize: Gapsize
 
 
 @dataclass
@@ -113,95 +96,134 @@ class BigramData:
     bigrams_to_locations: Dict[Bigram, Set[Tuple[LineIndex, TokenIndex]]] = field(
         default_factory=lambda: defaultdict(set)
     )
-    left_lex_to_bigrams: Dict[Tuple[Lexeme, Gapsize], Set[Bigram]] = field(
-        default_factory=lambda: defaultdict(set)
-    )
-    right_lex_to_bigrams: Dict[Tuple[Lexeme, Gapsize], Set[Bigram]] = field(
-        default_factory=lambda: defaultdict(set)
-    )
-    left_lex_freqs: Dict[Gapsize, Dict[Lexeme, int]] = field(
-        default_factory=lambda: defaultdict(dict)
-    )
-    right_lex_freqs: Dict[Gapsize, Dict[Lexeme, int]] = field(
-        default_factory=lambda: defaultdict(dict)
-    )
+    left_lex_freqs: Dict[Lexeme, int] = field(default_factory=dict)
+    right_lex_freqs: Dict[Lexeme, int] = field(default_factory=dict)
 
     @classmethod
-    def from_lexemes(cls, lexeme_data: LexemeData, gapsize: Gapsize) -> "BigramData":
+    def from_lexemes(cls, lexeme_data: LexemeData) -> "BigramData":
         bigram_data = cls()
         corpus_iter_progress = tqdm(
-            lexeme_data.line_lengths.items(),
+            range(lexeme_data.corpus_length),
             desc="Creating BigramData from LexemeData",
             unit="line",
-            total=len(lexeme_data.line_lengths),
+            total=lexeme_data.corpus_length - 1,
         )
-        for line_ix, line_length in corpus_iter_progress:
-            for curr_gapsize in range(gapsize + 1):
-                # `rightmost_leftedge` in code
-                # last token that can be part of a bigram. Think if gapsize = 0,
-                # the the penultimate token will be the first element of
-                # the final bigram
-                # e.g. (a, b, c, d) w/ gapsize 1
-                # last = 4 - 1 - 1 = 2
-                # Then note we input this into range(last) which is not inclusive,
-                # so this maps to indices 0, 1
-                last_token_index = TokenIndex(line_length - curr_gapsize - 1)
-                curr_gapsize = Gapsize(curr_gapsize)
-                for ix in range(last_token_index):
-                    ix = TokenIndex(ix)
-                    right_ix = TokenIndex(ix + curr_gapsize + 1)
-                    _left = lexeme_data.locations_to_lexemes[line_ix][ix]
-                    _right = lexeme_data.locations_to_lexemes[line_ix][right_ix]
-                    _location = (line_ix, ix)
-                    bigram = Bigram(el1=_left, el2=_right, gapsize=curr_gapsize)
-                    bigram_data.add_bigram(bigram, _location)
+        for line_ix in corpus_iter_progress:
+            line_lexeme_data = lexeme_data.locations_to_root_lexemes(LineIndex(line_ix))
+            line_items = list(line_lexeme_data.items())
+            for (left_ix, left), (_, right) in zip(line_items, line_items[1:]):
+                bigram = Bigram(el1=left, el2=right)
+                location = (LineIndex(line_ix), TokenIndex(left_ix))
+                bigram_data.add_bigram(bigram, location)
         return bigram_data
 
     def add_bigram(
         self, bigram: Bigram, location: Tuple[LineIndex, TokenIndex]
     ) -> None:
-        # Original code has a conditional here to only do this if the bigram
-        # isn't in the frequency counter yet, but that's a lot of checks that `add` can
-        # do for us anyway
-        self.left_lex_to_bigrams[(bigram.el1, bigram.gapsize)].add(bigram)
-        self.right_lex_to_bigrams[(bigram.el2, bigram.gapsize)].add(bigram)
-        if self.left_lex_freqs[bigram.gapsize].get(bigram.el1, None):
-            self.left_lex_freqs[bigram.gapsize][bigram.el1] += 1
+        if self.left_lex_freqs.get(bigram.el1, None):
+            self.left_lex_freqs[bigram.el1] += 1
         else:
-            self.left_lex_freqs[bigram.gapsize][bigram.el1] = 1
-        if self.right_lex_freqs[bigram.gapsize].get(bigram.el2, None):
-            self.right_lex_freqs[bigram.gapsize][bigram.el2] += 1
+            self.left_lex_freqs[bigram.el1] = 1
+        if self.right_lex_freqs.get(bigram.el2, None):
+            self.right_lex_freqs[bigram.el2] += 1
         else:
-            self.right_lex_freqs[bigram.gapsize][bigram.el2] = 1
+            self.right_lex_freqs[bigram.el2] = 1
         self.bigrams_to_freqs[bigram] += 1
         self.bigrams_to_locations[bigram].add(location)
 
     @property
-    def type_count(self) -> int:
-        return len(self.bigrams_to_freqs)
-
-    @property
     def bigram_count(self) -> int:
+        """Counts the total number of bigrams."""
         return sum(self.bigrams_to_freqs.values())
 
-    def remove_bigram(self, bigram: Bigram):
-        freq = self.bigrams_to_freqs.pop(bigram)
-        self.left_lex_to_bigrams[(bigram.el1, bigram.gapsize)].remove(bigram)
-        self.right_lex_to_bigrams[(bigram.el2, bigram.gapsize)].remove(bigram)
-        self.left_lex_freqs[bigram.gapsize][bigram.el1] -= freq
-        self.right_lex_freqs[bigram.gapsize][bigram.el2] -= freq
+
+@dataclass
+class WinnerInfo:
+    bigram: Bigram
+    merged_lexeme: Lexeme
+    bigram_locations: List[Tuple[LineIndex, TokenIndex]]
+
+    @classmethod
+    def from_bigram_with_data(cls, bigram: Bigram, bigram_data: BigramData):
+        el1_words = list(bigram.el1.word)
+        el2_words = list(bigram.el2.word)
+        all_words = el1_words + el2_words
+        new_lexeme = Lexeme(word=tuple(all_words), ix=0)
+        locations = sorted(bigram_data.bigrams_to_locations[bigram])
+        return cls(bigram=bigram, merged_lexeme=new_lexeme, bigram_locations=locations)
+
+    def clean_bigram_locations(self):
+        """This is greedily selecting correct bigrams from the candidate locations of bigrams.
+
+        Why? Well, in the case of a sentence like (a, a, a), with winner = (a, a), we can only convert
+        the first occurrence of this bigram and not the second, since the first occurence would be transformed into the bigram,
+        the new bigram in the second position no longer exists - but could be a candidate for the next round if it is indeed that common
+        of a pattern.
+
+        A more complex example is with winner (a, b, a, b) in ((a, b), (a, b), (a, b)). Here is the same idea: once we
+        merge the first occurence it is no longer available, even though it occurs later.
+        """
+        clean_locations = []
+        for line, location in groupby(self.bigram_locations, key=lambda x: x[0]):
+            exclude_token = set()
+            token_ix = [i[1] for i in location]
+            for token in token_ix:
+                if token in exclude_token:
+                    continue
+                excludes = [i for i in token_ix if i < token + self.n_lexemes]
+                exclude_token.update(excludes)
+                clean_locations.append((line, token))
+        return clean_locations
+
+    @property
+    def n_lexemes(self) -> int:
+        return len(self.merged_lexeme.word)
+
+    @property
+    def merge_token_count(self) -> int:
+        # TODO: Optimize by putting in loop so we don't have to iterate here
+        return len(self.clean_bigram_locations())
 
 
-def calculate_winner_array(bigram_data: BigramData) -> Bigram:
+def merge_winner(winner: WinnerInfo, lexeme_data: LexemeData) -> LexemeData:
+    for (line_ix, word_ix) in winner.clean_bigram_locations():
+        for lexeme_index in range(winner.n_lexemes):
+            pos = TokenIndex(word_ix + lexeme_index)
+            old_lexeme = lexeme_data.locations_to_lexemes[line_ix][pos]
+            lexeme = Lexeme(word=winner.merged_lexeme.word, ix=lexeme_index)
+            lexeme_data.lexemes_to_locations[lexeme].add((LineIndex(line_ix), pos))
+            lexeme_data.locations_to_lexemes[line_ix][pos] = lexeme
+            lexeme_data.lexemes_to_locations[old_lexeme].remove((line_ix, pos))
+
+    lexeme_data.lexemes_to_freqs[winner.merged_lexeme] = winner.merge_token_count
+
+    el1_freq = lexeme_data.lexemes_to_freqs[winner.bigram.el1]
+    new_el1_freq = el1_freq - winner.merge_token_count
+    lexeme_data.lexemes_to_freqs[winner.bigram.el1] = new_el1_freq
+
+    el2_freq = lexeme_data.lexemes_to_freqs[winner.bigram.el2]
+    new_el2_freq = el2_freq - winner.merge_token_count
+    lexeme_data.lexemes_to_freqs[winner.bigram.el2] = new_el2_freq
+
+    lexeme_data.lexemes_to_freqs = {
+        k: v for k, v in lexeme_data.lexemes_to_freqs.items() if v != 0
+    }
+    lexeme_data.lexemes_to_locations = defaultdict(
+        set, {k: v for k, v in lexeme_data.lexemes_to_locations.items() if v != set()}
+    )
+    return lexeme_data
+
+
+def calculate_winner(bigram_data: BigramData) -> Bigram:
     bigram_freq_array = np.empty(len(bigram_data.bigrams_to_freqs), dtype=np.int_)
     el1_freq_array = np.empty(len(bigram_data.bigrams_to_freqs), dtype=np.int_)
     el2_freq_array = np.empty(len(bigram_data.bigrams_to_freqs), dtype=np.int_)
     bigrams_list = []
     for i, (bigram, freq) in enumerate(bigram_data.bigrams_to_freqs.items()):
         bigram_freq_array[i] = freq
-        l1 = bigram_data.left_lex_freqs[bigram.gapsize][bigram.el1]
+        l1 = bigram_data.left_lex_freqs[bigram.el1]
         el1_freq_array[i] = l1
-        l2 = bigram_data.right_lex_freqs[bigram.gapsize][bigram.el2]
+        l2 = bigram_data.right_lex_freqs[bigram.el2]
         el2_freq_array[i] = l2
         bigrams_list.append(bigram)
     log_likelihoods = calculate_log_likelihood_array(
@@ -212,11 +234,6 @@ def calculate_winner_array(bigram_data: BigramData) -> Bigram:
     return winner
 
 
-# @numba.jit(
-#     numba.float64[:](numba.int64[:], numba.int64[:], numba.int64[:], numba.int64),
-#     nopython=True,
-#     parallel=True,
-# )
 def calculate_log_likelihood_array(
     bigram_freq_array: npt.NDArray[np.int_],
     el1_freq_array: npt.NDArray[np.int_],
@@ -243,341 +260,21 @@ def calculate_log_likelihood_array(
     return log_likelihood
 
 
-SatellitePosition = NewType("SatellitePosition", int)
-"""A satellite position is an integer representing the position of a word
-relative to the leftmost element of a Lexeme.
-
-e.g. Lexeme(('in', 0), ('of', 2))) has satellite positions [0, 2]. These are usually added to
-a TokenIndex in forming a ContextPosition.."""
-
-ContextPosition = NewType("ContextPosition", int)
-"""A context position is a TokenIndex ± (SatellitePosition + Gapsize + 1).
-It is used to identify candidate bigrams."""
-
-
-@dataclass
-class WinnerInfo:
-    bigram: Bigram
-    merged_lexeme: Lexeme
-    bigram_locations: Set[Tuple[LineIndex, TokenIndex]]
-    merge_token_count: int = 0
-    merged_satellite_positions: Dict[
-        Tuple[LineIndex, SatellitePosition], TokenIndex
-    ] = field(default_factory=dict)
-
-    @classmethod
-    def from_bigram_with_data(cls, bigram: Bigram, bigram_data: BigramData):
-        el1_words = list(bigram.el1.word)
-        el2_words_repositioned = [
-            Word(
-                wordstr=el2_word.wordstr,
-                position=(el2_word.position + bigram.gapsize + 1),
-            )
-            for el2_word in bigram.el2.word
-        ]
-        all_words = sorted(el1_words + el2_words_repositioned, key=lambda word: word[1])
-        new_lexeme = Lexeme(word=tuple(all_words), token_index=0)
-
-        locations = bigram_data.bigrams_to_locations[bigram]
-        return cls(bigram, new_lexeme, locations)
-
-    @property
-    def satellite_lexemes(self) -> Dict[SatellitePosition, Lexeme]:
-        """Generates satellite lexemes. This is used on the winning bigram lexeme,
-        Lexeme(words=(el1, el2)) to convert it into a Dict of lexemes like:
-        `{0: Lexeme((el1, el2), 0), 1: Lexeme((el1, el2)), 1)}`
-        for each word in the winning lexeme.
-
-        Keep in mind with gapsize > 0, you can get something like:
-        `{0: Lexeme((el1, el2), 0), 2: Lexeme((el1, el2)), 2)}`
-
-        Args:
-            merge_token (Lexeme): The winning lexeme (formed from two prior Lexeme elements)
-
-        Returns:
-            Dict[int, Lexeme]: Satellite Lexemes indexed by token index.
-        """
-        satellite_lexemes = {0: self.merged_lexeme}
-        for word in self.merged_lexeme.word:
-            if word.position > 0:
-                new_lexeme = Lexeme(self.merged_lexeme.word, word.position)
-                satellite_lexemes[word.position] = new_lexeme
-        return {SatellitePosition(k): v for k, v in satellite_lexemes.items()}
-
-    def satellite_positions(self, token_index: TokenIndex) -> List[SatellitePosition]:
-        return [
-            SatellitePosition(token_index + word.position)
-            for word in self.merged_lexeme.word
-        ]
-
-    def generate_context_positions(
-        self, line_length: int, token_index: TokenIndex, gapsize: Gapsize
-    ) -> List[Tuple[ContextPosition, SatellitePosition]]:
-        """Generates context positions from the merged lexeme.
-        For a given token_index and gapsize a context position is:
-
-        TokenIndex ± (SatellitePosition + Gapsize + 1)
-
-        e.g. for the first token, with a merged token position of 0, and no gap, it's the immediate
-        right token: 0 + 0 + 0 + 1 = 1
-
-        e.g. for the fifth token, with a merged word position of 2, gapsize 1 it's:
-        5 + 2 + 1 + 1 = 9 (from a discontiuous bigram with a discontinuous satellite from the gap)
-
-        It also calculates positions to the left of the lexeme via subtraction.
-
-        Args:
-            merge_token (Lexeme): The merge token to use word positions from.
-            line_length (int): The length of the line (used to filter satellite positions)
-            token_index (TokenIndex): The reference token index to generate positions from.
-            gapsize: (Gapsize): The gapsize to generate satellites for.
-
-        Returns:
-            _type_: _description_
-        """
-        satellite_positions: List[SatellitePosition] = [
-            SatellitePosition(token_index + word.position)
-            for word in self.merged_lexeme.word
-        ]
-        context_positions: List[Tuple[ContextPosition, SatellitePosition]] = []
-        for satellite_position in satellite_positions:
-            for curr_gapsize in range(gapsize + 1):
-                curr_gapsize = Gapsize(curr_gapsize)
-                left_context_position = ContextPosition(
-                    satellite_position - curr_gapsize - 1
-                )
-                if left_context_position >= 0:
-                    curr_contextpos = (left_context_position, satellite_position)
-                    context_positions.append(curr_contextpos)
-                right_context_position = ContextPosition(
-                    satellite_position + curr_gapsize + 1
-                )
-                if right_context_position < line_length:
-                    curr_contextpos = (
-                        right_context_position,
-                        satellite_position,
-                    )
-                    context_positions.append(curr_contextpos)
-        return context_positions
-
-
-def calculate_new_and_conflicting_bigrams(
-    winner: WinnerInfo,
-    lexeme_data: LexemeData,
-    gapsize: Gapsize,
-) -> Tuple[BigramData, BigramData]:
-    # TODO: Can we separate this logic from the merged satellite positions?
-
-    merge_token_count = 0
-    new_bigrams = BigramData()
-    conflicting_bigrams = BigramData()
-    merged_satellite_positions: Dict[
-        Tuple[LineIndex, SatellitePosition], TokenIndex
-    ] = {}
-
-    for (line_ix, word_ix) in winner.bigram_locations:
-        merge_token_count += 1
-
-        curr_turn_length = lexeme_data.line_lengths[line_ix]
-
-        context_positions = winner.generate_context_positions(
-            curr_turn_length, word_ix, gapsize
-        )
-        for context_position_info in context_positions:
-            context_pos, satellite_position = context_position_info
-            if context_pos in winner.satellite_positions(word_ix):
-                # This checks whether the token index is itself.
-
-                continue
-
-            premerge_lexeme, premerge_leftanchor = lexeme_data.get_lexeme(
-                line_ix, TokenIndex(satellite_position)
-            )
-            context_loc = (line_ix, TokenIndex(context_pos))
-
-            # Original Comment:
-            # Don't need to create conflicting bigram since this confl
-            # same bigram would have already been created when the adjacent
-            # merge token was created at an earlier iteration
-            if context_loc in merged_satellite_positions:
-                context_lexeme = winner.merged_lexeme
-                context_ix = merged_satellite_positions[
-                    (context_loc[0], SatellitePosition(context_loc[1]))
-                ]
-            else:
-                context_lexeme, context_ix = lexeme_data.get_lexeme(
-                    line_ix, TokenIndex(context_pos)
-                )
-
-            # new_bigrams are those where el1 or el2 are now merge_token
-            left_context = context_ix < word_ix
-            if left_context:
-                # all_lexemes.get_extant_loc_object(turn_number, context_ix )
-                location_tuple = (line_ix, context_ix)
-                gap_between_anchors = Gapsize(word_ix - context_ix - 1)
-                _left, _right = context_lexeme, winner.merged_lexeme
-            else:  # right context
-                location_tuple = (line_ix, word_ix)
-                # order reversed from left_context
-                gap_between_anchors = Gapsize(context_ix - word_ix - 1)
-                _left, _right = winner.merged_lexeme, context_lexeme
-            bigram = Bigram(el1=_left, el2=_right, gapsize=gap_between_anchors)
-            new_bigrams.add_bigram(bigram, location_tuple)
-
-            # conflicting_bigrams are those where pre-merge formed
-            # a bigram with the left anchor of the new bigram.
-            # e.g. merge_token = (c, d)
-            # span (a, b, c, d, e)
-            # (b, c) is a conflicting bigram (left context)
-            # beacuse the new bigram is (b, (c, d))
-
-            left_context = context_ix < premerge_leftanchor
-            if left_context:
-                # all_lexemes.get_extant_loc_object(turn_number, context_ix )
-                location_tuple = (line_ix, context_ix)
-                gap_between_anchors = Gapsize(premerge_leftanchor - context_ix - 1)
-                _left, _right = context_lexeme, premerge_lexeme
-            else:  # right context
-                location_tuple = (line_ix, premerge_leftanchor)
-                # order reversed from left_context
-                gap_between_anchors = Gapsize(context_ix - premerge_leftanchor - 1)
-                _left, _right = premerge_lexeme, context_lexeme
-            bigram = Bigram(el1=_left, el2=_right, gapsize=gap_between_anchors)
-            conflicting_bigrams.add_bigram(bigram, location_tuple)
-
-        for satellite_position in winner.satellite_positions(word_ix):
-            merged_satellite_positions[(line_ix, satellite_position)] = word_ix
-    winner.merge_token_count = merge_token_count
-    winner.merged_satellite_positions = merged_satellite_positions
-
-    return (new_bigrams, conflicting_bigrams)
-
-
-def update_all_lexemes_with_merge_tokens(
-    winner_info: WinnerInfo,
-    lexeme_data: LexemeData,
-):
-    lexeme_data.lexemes_to_freqs[
-        winner_info.merged_lexeme
-    ] = winner_info.merge_token_count
-
-    for (
-        line_ix,
-        satellite_pos,
-    ), word_ix in winner_info.merged_satellite_positions.items():
-        loc = (line_ix, TokenIndex(satellite_pos))
-        satellite_lexeme = winner_info.satellite_lexemes[
-            SatellitePosition(satellite_pos - word_ix)
-        ]
-        lexeme_data.lexemes_to_locations[satellite_lexeme].add(loc)
-        lexeme_data.locations_to_lexemes[line_ix][
-            TokenIndex(satellite_pos)
-        ] = satellite_lexeme
-
-
-def update_lexeme_counts_with_merged_elements(
-    winner_info: WinnerInfo, lexeme_data: LexemeData
-):
-    el1_freq = lexeme_data.lexemes_to_freqs[winner_info.bigram.el1]
-    new_el1_freq = el1_freq - winner_info.merge_token_count
-    lexeme_data.lexemes_to_freqs[winner_info.bigram.el1] = new_el1_freq
-
-    el2_freq = lexeme_data.lexemes_to_freqs[winner_info.bigram.el2]
-    new_el2_freq = el2_freq - winner_info.merge_token_count
-    lexeme_data.lexemes_to_freqs[winner_info.bigram.el2] = new_el2_freq
-
-
-def update_bigram_data(bigram_data: BigramData, new_bigrams: BigramData):
-    for bigram, freq in new_bigrams.bigrams_to_freqs.items():
-        bigram_data.bigrams_to_freqs[bigram] += freq
-        curr_locs = bigram_data.bigrams_to_locations[bigram]
-        bigram_data.bigrams_to_locations[bigram] = curr_locs.union(
-            new_bigrams.bigrams_to_locations[bigram]
-        )
-
-    for (el1, curr_gapsize), bigrams in new_bigrams.left_lex_to_bigrams.items():
-        curr_left_lex_to_bigrams = bigram_data.left_lex_to_bigrams[(el1, curr_gapsize)]
-        bigram_data.left_lex_to_bigrams[
-            (el1, curr_gapsize)
-        ] = curr_left_lex_to_bigrams.union(bigrams)
-        bigram_data.left_lex_freqs[curr_gapsize][el1] = new_bigrams.left_lex_freqs[
-            curr_gapsize
-        ][el1]
-
-    for (el2, curr_gapsize), bigrams in new_bigrams.right_lex_to_bigrams.items():
-        curr_right_lex_to_bigrams = bigram_data.right_lex_to_bigrams[
-            (el2, curr_gapsize)
-        ]
-        bigram_data.right_lex_to_bigrams[
-            (el2, curr_gapsize)
-        ] = curr_right_lex_to_bigrams.union(bigrams)
-        bigram_data.right_lex_freqs[curr_gapsize][el2] = new_bigrams.right_lex_freqs[
-            curr_gapsize
-        ][el2]
-
-
-def update_conflicting_bigrams(
-    bigram_data: BigramData, conflicting_bigrams: BigramData
-):
-    for bigram, freq in conflicting_bigrams.bigrams_to_freqs.items():
-        bigram_data.bigrams_to_freqs[bigram] -= freq
-        curr_locs = conflicting_bigrams.bigrams_to_locations[bigram]
-        for loc in curr_locs:
-            bigram_data.bigrams_to_locations[bigram].remove(loc)
-        if bigram_data.bigrams_to_freqs[bigram] < 1:
-            del bigram_data.bigrams_to_freqs[bigram]
-            del bigram_data.bigrams_to_locations[bigram]
-            bigram_data.left_lex_to_bigrams[(bigram.el1, bigram.gapsize)].remove(bigram)
-            bigram_data.right_lex_to_bigrams[(bigram.el2, bigram.gapsize)].remove(
-                bigram
-            )
-
-
-def remove_winner_from_bigram_data(winner: Bigram, bigram_data: BigramData):
-    bigram_data.bigrams_to_freqs.pop(winner)
-    bigram_data.bigrams_to_locations.pop(winner)
-    bigram_data.left_lex_to_bigrams[(winner.el1, winner.gapsize)].remove(winner)
-    bigram_data.right_lex_to_bigrams[(winner.el2, winner.gapsize)].remove(winner)
-
-
 def run(
-    corpus: List[List[str]],
-    gapsize: int,
-    iterations: int,
-    *,
-    min_bigram_freq: int = 0,
-    min_lexeme_freq: int = 0,
-):
-    winners: List[Lexeme] = []
-    gapsize = Gapsize(gapsize)
+    corpus: List[List[str]], iterations: int, output: Optional[Path] = None
+) -> List[WinnerInfo]:
+    winners: List[WinnerInfo] = []
     lexemes = LexemeData.from_corpus(corpus)
-    bigrams = BigramData.from_lexemes(lexemes, gapsize)
-    # statistics = create_bigram_table(
-    #     lexemes,
-    #     bigrams,
-    #     min_bigram_freq=min_bigram_freq,
-    #     min_lexeme_freq=min_lexeme_freq,
-    # )
+    bigrams = BigramData.from_lexemes(lexemes)
     for _ in trange(iterations):
-        winner = calculate_winner_array(bigrams)
-        winner_info = WinnerInfo.from_bigram_with_data(winner, bigrams)
-        winners.append(winner_info.merged_lexeme)
-        # Cleanup stuff
-        (
-            new_bigrams,
-            conflicting_bigrams,
-        ) = calculate_new_and_conflicting_bigrams(winner_info, lexemes, gapsize)
-        # Mutating these in-place now!
-        update_all_lexemes_with_merge_tokens(winner_info, lexemes)
-        update_lexeme_counts_with_merged_elements(winner_info, lexemes)
-        update_bigram_data(bigrams, new_bigrams)
-        update_conflicting_bigrams(bigrams, conflicting_bigrams)
-        remove_winner_from_bigram_data(winner, bigrams)
-        # statistics = create_bigram_table(
-        #     lexemes,
-        #     bigrams,
-        #     min_bigram_freq=min_bigram_freq,
-        #     min_lexeme_freq=min_lexeme_freq,
-        # )
-
+        winning_bigram = calculate_winner(bigrams)
+        winner = WinnerInfo.from_bigram_with_data(
+            bigram=winning_bigram, bigram_data=bigrams
+        )
+        winners.append(winner)
+        if output:
+            winner_lexemes = {i: w.merged_lexeme.word for i, w in enumerate(winners)}
+            output.write_text(json.dumps(winner_lexemes))
+        lexemes = merge_winner(winner, lexemes)
+        bigrams = BigramData.from_lexemes(lexemes)
     return winners
