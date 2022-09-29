@@ -1,6 +1,8 @@
 from typing import List
 
 from merge_redux import run
+from merge_redux.core_nogap import run as run_nogap
+
 
 if __name__ == "__main__":
     from itertools import chain
@@ -17,4 +19,6 @@ if __name__ == "__main__":
     print(f"Lines (turns): {len(corpus):,}")
     print(f"Tokens (corpus_size in code): {initial_corpus_size:,}")
 
-    print(*run(corpus, 0, 50, min_bigram_freq=0, min_lexeme_freq=0), sep="\n")
+    winners = run(corpus, 0, 1000, min_bigram_freq=0, min_lexeme_freq=0)
+    # print(*run(corpus, 0, 50, min_bigram_freq=0, min_lexeme_freq=0), sep="\n")
+    # print(*run_nogap(corpus, 10, min_bigram_freq=0, min_lexeme_freq=0), sep="\n")
