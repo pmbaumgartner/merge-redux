@@ -5,12 +5,18 @@ from pathlib import Path
 from typing import Counter as CounterType, Iterable, Optional, Sized
 from typing import DefaultDict, Dict, List, NamedTuple, NewType, Set, Tuple
 import json
+from enum import Enum
 
 import numpy as np
 import numpy.typing as npt
 from tqdm import tqdm, trange
 
 _SMALL = 1e-10
+
+
+class SelectionMethod(str, Enum):
+    frequency = "frequency"
+    log_likelihood = "log_likelihood"
 
 
 class Lexeme(NamedTuple):
@@ -64,12 +70,6 @@ class LexemeData:
     def corpus_length(self) -> int:
         """Returns number of lines in corpus: max(line_ix) + 1."""
         return max(self.locations_to_lexemes.keys()) + 1
-
-    @property
-    def corpus_size(self) -> int:
-        """The total number of Lexemes within the corpus. Will get smaller as
-        unigrams get merged into bigrams (as those are a single 'token')"""
-        return sum(self.lexemes_to_freqs.values())
 
     def render_corpus(self) -> List[List[Lexeme]]:
         corpus = []
@@ -214,7 +214,7 @@ def merge_winner(winner: WinnerInfo, lexeme_data: LexemeData) -> LexemeData:
     return lexeme_data
 
 
-def calculate_winner(bigram_data: BigramData) -> Bigram:
+def calculate_winner_log_likelihood(bigram_data: BigramData) -> Bigram:
     bigram_freq_array = np.empty(len(bigram_data.bigrams_to_freqs), dtype=np.int_)
     el1_freq_array = np.empty(len(bigram_data.bigrams_to_freqs), dtype=np.int_)
     el2_freq_array = np.empty(len(bigram_data.bigrams_to_freqs), dtype=np.int_)
@@ -226,7 +226,7 @@ def calculate_winner(bigram_data: BigramData) -> Bigram:
         l2 = bigram_data.right_lex_freqs[bigram.el2]
         el2_freq_array[i] = l2
         bigrams_list.append(bigram)
-    log_likelihoods = calculate_log_likelihood_array(
+    log_likelihoods = _calculate_log_likelihood(
         bigram_freq_array, el1_freq_array, el2_freq_array, bigram_data.bigram_count
     )
     winner_ix = np.argmax(log_likelihoods)
@@ -234,7 +234,11 @@ def calculate_winner(bigram_data: BigramData) -> Bigram:
     return winner
 
 
-def calculate_log_likelihood_array(
+def calculate_winner_frequency(bigrams: BigramData) -> Bigram:
+    return bigrams.bigrams_to_freqs.most_common()[0][0]
+
+
+def _calculate_log_likelihood(
     bigram_freq_array: npt.NDArray[np.int_],
     el1_freq_array: npt.NDArray[np.int_],
     el2_freq_array: npt.NDArray[np.int_],
@@ -260,14 +264,24 @@ def calculate_log_likelihood_array(
     return log_likelihood
 
 
+SELECTION_METHODS = {
+    SelectionMethod.log_likelihood: calculate_winner_log_likelihood,
+    SelectionMethod.frequency: calculate_winner_frequency,
+}
+
+
 def run(
-    corpus: List[List[str]], iterations: int, output: Optional[Path] = None
+    corpus: List[List[str]],
+    iterations: int,
+    method: SelectionMethod = SelectionMethod.log_likelihood,
+    output: Optional[Path] = None,
 ) -> List[WinnerInfo]:
     winners: List[WinnerInfo] = []
     lexemes = LexemeData.from_corpus(corpus)
     bigrams = BigramData.from_lexemes(lexemes)
+    winner_selection_function = SELECTION_METHODS[method]
     for _ in trange(iterations):
-        winning_bigram = calculate_winner(bigrams)
+        winning_bigram = winner_selection_function(bigrams)
         winner = WinnerInfo.from_bigram_with_data(
             bigram=winning_bigram, bigram_data=bigrams
         )
