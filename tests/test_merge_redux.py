@@ -11,5 +11,10 @@ def test_version():
 
 
 def test_single_iter(sample_corpus):
-    winners = run(sample_corpus, 0, 1)
-    # assert winners == [Lexeme((Word("you", 0), Word("know", 1)), 0)]
+    winners = run(sample_corpus, 1)
+    assert winners[0].merged_lexeme == Lexeme(("you", "know"), 0)
+
+
+# a a a a
+
+# c a b a b a b d
